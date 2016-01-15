@@ -390,7 +390,8 @@ def main():
     all_examples.append(examples)
     all_labels.append(labels)
 
-  np.savez_compressed("all_examples", examples=numpy.vstack(all_examples), labels=numpy.vstack(all_labels))
+  np.savez_compressed("all_examples", examples=np.vstack(all_examples), labels=np.vstack(all_labels))
+  print "Done generating ", np.vstack(all_examples).shape[0], " labelled examples"
 
 if __name__ == '__main__':
   main()
