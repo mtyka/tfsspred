@@ -7,6 +7,7 @@ from __future__ import print_function
 import gzip
 import os
 import sys
+import argparse
 
 import tensorflow.python.platform
 
@@ -16,13 +17,14 @@ from six.moves import xrange  # pylint: disable=redefined-builtin
 import tensorflow as tf
 
 SEQUENCE_WINDOW = 21
-FEATURES = 47
+NUM_FEATURES = 47
 LABEL_WINDOW = 3
 NUM_LABELS =  8
-VALIDATION_SIZE = 5000  # Size of the validation set.
+VALIDATION_SIZE = 1000  
+TEST_SIZE = 1000  
 SEED = 66478  # Set to None for random seed.
 BATCH_SIZE = 64
-NUM_EPOCHS = 100
+NUM_EPOCHS = 1000
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -48,53 +50,65 @@ def extract_labels(filename, num_images):
   return (numpy.arange(NUM_LABELS) == labels[:, None]).astype(numpy.float32)
 
 
-def error_rate(predictions, labels):
+def success_rate(predictions, labels):
   """Return the error rate based on dense predictions and 1-hot labels."""
-  print(predictions.shape, labels.shape)
-  return 100.0 - (
-      100.0 *
-      numpy.sum(numpy.argmax(predictions, 1) == numpy.argmax(labels, 1)) /
-      predictions.shape[0])
+  #print(predictions.shape, labels.shape)
+  return 100.0 * numpy.sum(numpy.argmax(predictions, 1) == numpy.argmax(labels, 1)) / predictions.shape[0]
 
-def error_rate_3state(predictions, labels):
+def success_rate_3state(predictions, labels):
   """Return the error rate based on prediction limited to 3-state E,H,C"""
   ## Collapse states 3-8 to 3
-  predictions_3state = numpy.hstack((predictions[:,0:3],numpy.amax(predictions[:,3:,None],1)))
-  labels_3state = numpy.hstack((labels[:,0:3],numpy.amax(labels[:,3:,None],1)))
-  return 100.0 - (
-      100.0 *
-      numpy.sum(numpy.argmax(predictions_3state, 1) == numpy.argmax(labels_3state, 1)) /
-      predictions_3state.shape[0])
+  predictions = numpy.roll(predictions,-1,axis=1) 
+  labels = numpy.roll(labels,-1,axis=1) 
+  predictions_3state = numpy.hstack((predictions[:,0:2],numpy.amax(predictions[:,2:,None],1)))
+  labels_3state = numpy.hstack((labels[:,0:2],numpy.amax(labels[:,2:,None],1)))
+  #print("3state: ", predictions_3state.shape, labels_3state.shape, predictions_3state.sum(), labels_3state.sum())
+  #print("preds: ", predictions_3state[0:10])
+  return 100.0 * numpy.sum(numpy.argmax(predictions_3state, 1) == numpy.argmax(labels_3state, 1)) / predictions_3state.shape[0]
 
+def flatten(data):
+  """Returns a reshaped tensor such that [a,b,c,...,z] dimensioned tesnor becomes
+     a [a, b*c*...*z] dimensioned one."""
+  data_shape = data.get_shape().as_list()
+  return tf.reshape(data, [data_shape[0], numpy.array(data_shape[1:]).prod()])
 
 def main(argv=None):  # pylint: disable=unused-argument
+  parser = argparse.ArgumentParser(
+      description='Secondary structure prediction with TensorFlow.',
+      formatter_class=argparse.ArgumentDefaultsHelpFormatter
+  )
+  parser.add_argument('--dataset', type=str, default="full_list_100.examples.npz",
+                      help='Input file contain training, validation and test data.')
+  args = parser.parse_args()
 
   # Extract it into numpy arrays.
   
-  train = numpy.load("all_examples.npz")
-  train_data = train["examples"]
-  train_labels = train["labels"][:,1] # use middle label for now
-  print ("Training data: ", train_data.shape, train_labels.shape)
-  
-  test = numpy.load("all_examples.npz")
-  test_data = test["examples"]
-  test_labels = test["labels"][:,1] # use middle label for now
-  print ("Test data: ", test_data.shape, test_labels.shape)
+  all_data = numpy.load(args.dataset)
+  all_examples = all_data["examples"]
+  all_labels = all_data["labels"][:,1] # use middle label for now
+  print ("Training data: ", all_examples.shape, " labels: ", all_labels.shape)
+  percentages = numpy.sum(all_labels, axis=0)/all_labels.shape[0]*100
+  print(percentages.astype(numpy.int32))
 
+  ## FAKE IT OUT:
+  #all_examples[:,11,0:8] = all_labels
+  
   # Generate a validation set.
-  validation_data = train_data[:VALIDATION_SIZE, :, :]
-  validation_labels = train_labels[:VALIDATION_SIZE]
-  train_data = train_data[VALIDATION_SIZE:, :, :]
-  train_labels = train_labels[VALIDATION_SIZE:]
+  validation_data   = all_examples[:VALIDATION_SIZE, :, :]
+  validation_labels = all_labels[:VALIDATION_SIZE]
+  train_data = all_examples[VALIDATION_SIZE:-TEST_SIZE:, :, :]
+  train_labels = all_labels[VALIDATION_SIZE:-TEST_SIZE:]
+  train_size = train_data.shape[0]
+  test_data =   all_examples[-TEST_SIZE:, :, :]
+  test_labels = all_labels[-TEST_SIZE:]
   num_epochs = NUM_EPOCHS
-  train_size = train_labels.shape[0]
 
   # This is where training samples and labels are fed to the graph.
   # These placeholder nodes will be fed a batch of training data at each
   # training step using the {feed_dict} argument to the Run() call below.
   train_data_node = tf.placeholder(
       tf.float32,
-      shape=(BATCH_SIZE, SEQUENCE_WINDOW, FEATURES))
+      shape=(BATCH_SIZE, SEQUENCE_WINDOW, NUM_FEATURES))
   train_labels_node = tf.placeholder(tf.float32,
                                      shape=(BATCH_SIZE, NUM_LABELS))
   # For the validation and test data, we'll just hold the entire dataset in
@@ -105,46 +119,74 @@ def main(argv=None):  # pylint: disable=unused-argument
   # The variables below hold all the trainable weights. They are passed an
   # initial value which will be assigned when when we call:
   # {tf.initialize_all_variables().run()}
-###  conv1_weights = tf.Variable(
-###      tf.truncated_normal([5, 5, NUM_CHANNELS, 32],  # 5x5 filter, depth 32.
-###                          stddev=0.1,
-###                          seed=SEED))
-###  conv1_biases = tf.Variable(tf.zeros([32]))
-###  conv2_weights = tf.Variable(
-###      tf.truncated_normal([5, 5, 32, 64],
-###                          stddev=0.1,
-###                          seed=SEED))
-###  conv2_biases = tf.Variable(tf.constant(0.1, shape=[64]))
+  conv1_filters = 64
+  conv1_weights = tf.Variable(
+      tf.truncated_normal([1, 5, NUM_FEATURES, conv1_filters],  # 5x1 filter, depth 32.
+                          stddev=0.1,
+                          seed=SEED))
+  conv1_biases = tf.Variable(tf.zeros([conv1_filters]))
+  conv2_filters = 128
+  conv2_weights = tf.Variable(
+      tf.truncated_normal([1, 5, conv1_filters, conv2_filters],
+                          stddev=0.1,
+                          seed=SEED))
+  conv2_biases = tf.Variable(tf.constant(0.1, shape=[conv2_filters]))
 
-  fc1_weights = tf.Variable(  # fully connected, depth 512.
+  #fc1_features = NUM_FEATURES
+  fc1_nodes = 128
+  fc1_weights = tf.Variable(  
       tf.truncated_normal(
-          [SEQUENCE_WINDOW*FEATURES, 256],
+          [SEQUENCE_WINDOW*conv2_filters, fc1_nodes],
           stddev=0.1,
           seed=SEED))
-  fc1_biases = tf.Variable(tf.constant(0.1, shape=[256]))
+  fc1_biases = tf.Variable(tf.constant(0.1, shape=[fc1_nodes]))
   
   fc2_weights = tf.Variable(
-      tf.truncated_normal([256, NUM_LABELS],
+      tf.truncated_normal([fc1_nodes, NUM_LABELS],
                           stddev=0.1,
                           seed=SEED))
   fc2_biases = tf.Variable(tf.constant(0.1, shape=[NUM_LABELS]))
 
-  def model(data, train=False):
+
+  def model_fc(data, train=False):
     """The Model definition."""
-    # Reshape data into linear input 
-    data_shape = data.get_shape().as_list()
-    reshape = tf.reshape( data,
-        [data_shape[0], data_shape[1] * data_shape[2]])
     # FC1 
-    hidden = tf.nn.relu(tf.matmul(reshape, fc1_weights) + fc1_biases)
+    hidden = tf.nn.relu(tf.matmul(flatten(data), fc1_weights) + fc1_biases)
     # Add a 50% dropout during training only. Dropout also scales
     # activations such that no rescaling is needed at evaluation time.
     if train:
-      hidden = tf.nn.dropout(hidden, 0.5, seed=SEED)
+      hidden = tf.nn.dropout(hidden, 0.2, seed=SEED)
     # FC2
     hidden = tf.matmul(hidden, fc2_weights) + fc2_biases
     return hidden
 
+  def model_conv(data, train=False):
+    """The Model definition."""
+    # Add a dimension 'y' with width 1 so we can use conv2d 
+    # (even though we're just doing 1d convolutions)
+    data_shape = data.get_shape().as_list()
+    data = tf.reshape(
+        data,
+        [data_shape[0], 1,  data_shape[1],  data_shape[2]])
+    #print(data.get_shape().as_list())
+    # 2D convolution, with 'SAME' padding (i.e. the output feature map has
+    # the same size as the input). Note that {strides} is a 4D array whose
+    # shape matches the data layout: [image index, y, x, depth].
+    conv = tf.nn.conv2d(data,
+                        conv1_weights,
+                        strides=[1, 1, 1, 1],
+                        padding='SAME')
+    # Bias and rectified linear non-linearity.
+    relu = tf.nn.relu(tf.nn.bias_add(conv, conv1_biases))
+    conv = tf.nn.conv2d(conv,
+                        conv2_weights,
+                        strides=[1, 1, 1, 1],
+                        padding='SAME')
+    relu = tf.nn.relu(tf.nn.bias_add(conv, conv2_biases))
+    return model_fc(conv, train) 
+
+  def model(data, train=False):
+    return model_conv(data, train) 
 
   # Training computation: logits + cross-entropy loss.
   logits = model(train_data_node, True)
@@ -166,7 +208,7 @@ def main(argv=None):  # pylint: disable=unused-argument
       0.01,                # Base learning rate.
       batch * BATCH_SIZE,  # Current index into the dataset.
       train_size,          # Decay step.
-      0.95,                # Decay rate.
+      0.99,                # Decay rate.
       staircase=True)
   
   # Use simple momentum for the optimization.
@@ -201,60 +243,16 @@ def main(argv=None):  # pylint: disable=unused-argument
           [optimizer, loss, learning_rate, train_prediction],
           feed_dict=feed_dict)
       if step % 100 == 0:
-        print('Epoch %.2f' % (float(step) * BATCH_SIZE / train_size))
-        print('Minibatch loss: %.3f, learning rate: %.6f' % (l, lr))
-        print('Minibatch error: %.1f%%' % error_rate(predictions, batch_labels))
-        print('Validation error: %.1f%%' %
-              error_rate(validation_prediction.eval(), validation_labels))
-        print('Validation error 3state: %.1f%%' %
-              error_rate_3state(validation_prediction.eval(), validation_labels))
+        print('Epoch %.2f learning rate: %.6f Validation error: %.1f%% 3state: %.1f%% ' % (
+          float(step) * BATCH_SIZE / train_size, 
+          lr,
+          success_rate(validation_prediction.eval(), validation_labels), 
+          success_rate_3state(validation_prediction.eval(), validation_labels)))
         sys.stdout.flush()
     # Finally print the result!
-    test_error = error_rate(test_prediction.eval(), test_labels)
+    test_error = success_rate(test_prediction.eval(), test_labels)
     print('Test error: %.1f%%' % test_error)
 
 if __name__ == '__main__':
   tf.app.run()
   
-####  # We will replicate the model structure for the training subgraph, as well
-####  # as the evaluation subgraphs, while sharing the trainable parameters.
-####  def model_conv(data, train=False):
-####    """The Model definition."""
-####    # 2D convolution, with 'SAME' padding (i.e. the output feature map has
-####    # the same size as the input). Note that {strides} is a 4D array whose
-####    # shape matches the data layout: [image index, y, x, depth].
-####    conv = tf.nn.conv2d(data,
-####                        conv1_weights,
-####                        strides=[1, 1, 1, 1],
-####                        padding='SAME')
-####    # Bias and rectified linear non-linearity.
-####    relu = tf.nn.relu(tf.nn.bias_add(conv, conv1_biases))
-####    # Max pooling. The kernel size spec {ksize} also follows the layout of
-####    # the data. Here we have a pooling window of 2, and a stride of 2.
-####    pool = tf.nn.max_pool(relu,
-####                          ksize=[1, 2, 2, 1],
-####                          strides=[1, 2, 2, 1],
-####                          padding='SAME')
-####    conv = tf.nn.conv2d(pool,
-####                        conv2_weights,
-####                        strides=[1, 1, 1, 1],
-####                        padding='SAME')
-####    relu = tf.nn.relu(tf.nn.bias_add(conv, conv2_biases))
-####    pool = tf.nn.max_pool(relu,
-####                          ksize=[1, 2, 2, 1],
-####                          strides=[1, 2, 2, 1],
-####                          padding='SAME')
-####    # Reshape the feature map cuboid into a 2D matrix to feed it to the
-####    # fully connected layers.
-####    pool_shape = pool.get_shape().as_list()
-####    reshape = tf.reshape(
-####        pool,
-####        [pool_shape[0], pool_shape[1] * pool_shape[2] * pool_shape[3]])
-####    # Fully connected layer. Note that the '+' operation automatically
-####    # broadcasts the biases.
-####    hidden = tf.nn.relu(tf.matmul(reshape, fc1_weights) + fc1_biases)
-####    # Add a 50% dropout during training only. Dropout also scales
-####    # activations such that no rescaling is needed at evaluation time.
-####    if train:
-####      hidden = tf.nn.dropout(hidden, 0.5, seed=SEED)
-####    return tf.matmul(hidden, fc2_weights) + fc2_biases

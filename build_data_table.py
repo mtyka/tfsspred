@@ -375,8 +375,8 @@ def main():
 
   input_files = open(args.input_list).xreadlines()
 
-  all_examples = None
-  all_labels = None
+  all_examples = [] 
+  all_labels = []
 
   for input_file in input_files:
     input_file = input_file.strip()
@@ -387,15 +387,10 @@ def main():
     pdb.ReadDSSPFile(input_file + ".dssp")
     pdb.ReadHHMFile(input_file + ".fas.hhm")
     examples, labels = pdb.GenerateTrainingExamples(input_file)
-    if isinstance(all_labels, np.ndarray): 
-      all_labels = np.vstack((all_labels, labels))
-    else: all_labels = labels
-    if isinstance(all_examples, np.ndarray): 
-      all_examples = np.vstack((all_examples, examples))
-    else: all_examples = examples
-  
-  print "DONE!: ", all_examples.shape, all_labels.shape
-  np.savez_compressed("all_examples", examples=all_examples, labels=all_labels)
+    all_examples.append(examples)
+    all_labels.append(labels)
+
+  np.savez_compressed("all_examples", examples=numpy.vstack(all_examples), labels=numpy.vstack(all_labels))
 
 if __name__ == '__main__':
   main()
