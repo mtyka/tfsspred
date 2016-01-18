@@ -24,7 +24,7 @@ VALIDATION_SIZE = 20000
 TEST_SIZE = 20000
 SEED = 66478  # Set to None for random seed.
 BATCH_SIZE = 1024
-NUM_EPOCHS = 1000
+NUM_EPOCHS =   100
 
 tf.app.flags.DEFINE_string("dataset", "full_list_100.examples.npz", 
        'Input file contain training, validation and test data.')
@@ -84,9 +84,6 @@ def main(argv=None):  # pylint: disable=unused-argument
   percentages = numpy.sum(all_labels, axis=0)/all_labels.shape[0]*100
   print(percentages.astype(numpy.int32))
 
-  ## FAKE IT OUT:
-  #all_examples[:,11,0:8] = all_labels
-
   # Generate a validation set.
   validation_data   = all_examples[:VALIDATION_SIZE, :, :]
   validation_labels = all_labels[:VALIDATION_SIZE]
@@ -118,18 +115,30 @@ def main(argv=None):  # pylint: disable=unused-argument
   # The variables below hold all the trainable weights. They are passed an
   # initial value which will be assigned when when we call:
   # {tf.initialize_all_variables().run()}
-  conv1_filters = 64
+  conv1_filters = 128
   conv1_weights = tf.Variable(
-      tf.truncated_normal([1, 5, NUM_FEATURES, conv1_filters],  # 5x1 filter, depth 32.
+      tf.truncated_normal([1, 3, NUM_FEATURES, conv1_filters],  # 5x1 filter, depth 32.
                           stddev=0.1,
                           seed=SEED))
   conv1_biases = tf.Variable(tf.zeros([conv1_filters]))
-  conv2_filters = 128
+  conv2_filters = 256
   conv2_weights = tf.Variable(
-      tf.truncated_normal([1, 5, conv1_filters, conv2_filters],
+      tf.truncated_normal([1, 3, conv1_filters, conv2_filters],
                           stddev=0.1,
                           seed=SEED))
   conv2_biases = tf.Variable(tf.constant(0.1, shape=[conv2_filters]))
+  conv3_filters = 256
+  conv3_weights = tf.Variable(
+      tf.truncated_normal([1, 3, conv2_filters, conv3_filters],
+                          stddev=0.1,
+                          seed=SEED))
+  conv3_biases = tf.Variable(tf.constant(0.1, shape=[conv3_filters]))
+  conv4_filters = 256
+  conv4_weights = tf.Variable(
+      tf.truncated_normal([1, 3, conv3_filters, conv4_filters],
+                          stddev=0.1,
+                          seed=SEED))
+  conv4_biases = tf.Variable(tf.constant(0.1, shape=[conv4_filters]))
 
   #fc1_features = NUM_FEATURES
   fc1_nodes = 256
@@ -177,12 +186,24 @@ def main(argv=None):  # pylint: disable=unused-argument
                         padding='SAME')
     # Bias and rectified linear non-linearity.
     relu = tf.nn.relu(tf.nn.bias_add(conv, conv1_biases))
-    conv = tf.nn.conv2d(conv,
+    conv = tf.nn.conv2d(relu,
                         conv2_weights,
                         strides=[1, 1, 1, 1],
                         padding='SAME')
     relu = tf.nn.relu(tf.nn.bias_add(conv, conv2_biases))
-    return model_fc(conv, train)
+    
+    conv = tf.nn.conv2d(relu,
+                        conv3_weights,
+                        strides=[1, 1, 1, 1],
+                        padding='SAME')
+    relu = tf.nn.relu(tf.nn.bias_add(conv, conv3_biases))
+    conv = tf.nn.conv2d(conv,
+                        conv4_weights,
+                        strides=[1, 1, 1, 1],
+                        padding='SAME')
+    relu = tf.nn.relu(tf.nn.bias_add(conv, conv4_biases))
+    
+    return model_fc(relu, train)
 
   def model(data, train=False):
     return model_conv(data, train)
@@ -250,7 +271,7 @@ def main(argv=None):  # pylint: disable=unused-argument
         sys.stdout.flush()
     # Finally print the result!
     test_error = success_rate(test_prediction.eval(), test_labels)
-    print('Test error: %.1f%%' % test_error)
+    print('Test error: %.1f%%  %.1f%% ' %(success_rate(test_prediction.eval(), test_labels) ,success_rate_3state(test_prediction.eval(), test_labels)    ))
 
 if __name__ == '__main__':
   tf.app.run()
