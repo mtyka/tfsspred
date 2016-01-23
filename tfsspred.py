@@ -8,116 +8,151 @@ import gzip
 import os
 import sys
 import argparse
+import time
+import random
 
 import tensorflow.python.platform
 
-import numpy
+import numpy as np
 from six.moves import urllib
 from six.moves import xrange  # pylint: disable=redefined-builtin
 import tensorflow as tf
 
-SEQUENCE_WINDOW = 21
+DSSP_WINDOW = 1
+RESIDUE_ALPHABET = 21
+HHM_ALPHABET = 26
+DSSP_ALPHABET = 8
 NUM_FEATURES = 47
-LABEL_WINDOW = 3
-NUM_LABELS =  8
-VALIDATION_SIZE = 20000
-TEST_SIZE = 20000
+NUM_LABELS = DSSP_ALPHABET * DSSP_WINDOW 
+VALIDATION_SIZE = 40000
+TEST_SIZE = 40000
+TRAINING_SIZE = 1600000
+
 SEED = 66478  # Set to None for random seed.
-BATCH_SIZE = 1024
-NUM_EPOCHS =   100
+BATCH_SIZE =  2048
 
-tf.app.flags.DEFINE_string("dataset", "full_list_100.examples.npz", 
+tf.app.flags.DEFINE_string("dataset", "compacter.npz", 
        'Input file contain training, validation and test data.')
-
+tf.app.flags.DEFINE_integer("sequence_window", "15", 
+       'Size of the sequence input window. Must be odd number for symmetry.')
+tf.app.flags.DEFINE_integer("num_epochs", "100", 
+       'Num of epochs to train for.')
 FLAGS = tf.app.flags.FLAGS
-
-def extract_data(filename):
-  print('Extracting', filename)
-  f=gzip.open(filename,'rb')
-  buf=f.read()
-  data = numpy.frombuffer(buf, dtype=numpy.float32)
-  print(data.shape)
-  data = data.reshape((-1, 21, 47))
-  print(data.shape)
-  return data
-
-
-def extract_labels(filename, num_images):
-  """Extract the labels into a 1-hot matrix [image index, label index]."""
-  print('Extracting', filename)
-  with gzip.open(filename) as bytestream:
-    bytestream.read(8)
-    buf = bytestream.read(1 * num_images)
-    labels = numpy.frombuffer(buf, dtype=numpy.uint8)
-  # Convert to dense 1-hot representation.
-  return (numpy.arange(NUM_LABELS) == labels[:, None]).astype(numpy.float32)
 
 
 def success_rate(predictions, labels):
   """Return the error rate based on dense predictions and 1-hot labels."""
-  #print(predictions.shape, labels.shape)
-  return 100.0 * numpy.sum(numpy.argmax(predictions, 1) == numpy.argmax(labels, 1)) / predictions.shape[0]
+  return 100.0 * np.sum(np.argmax(predictions, 1) == labels) / predictions.shape[0]
 
 def success_rate_3state(predictions, labels):
   """Return the error rate based on prediction limited to 3-state E,H,C"""
   ## Collapse states 3-8 to 3
-  predictions = numpy.roll(predictions,-1,axis=1)
-  labels = numpy.roll(labels,-1,axis=1)
-  predictions_3state = numpy.hstack((predictions[:,0:2],numpy.amax(predictions[:,2:,None],1)))
-  labels_3state = numpy.hstack((labels[:,0:2],numpy.amax(labels[:,2:,None],1)))
-  #print("3state: ", predictions_3state.shape, labels_3state.shape, predictions_3state.sum(), labels_3state.sum())
-  #print("preds: ", predictions_3state[0:10])
-  return 100.0 * numpy.sum(numpy.argmax(predictions_3state, 1) == numpy.argmax(labels_3state, 1)) / predictions_3state.shape[0]
+  predictions = np.roll(predictions,-1,axis=1)
+  predictions_3state = np.hstack((predictions[:,0:2],np.amax(predictions[:,2:,None],1)))
+  labels_3state = labels.copy()
+  labels_3state[labels_3state==0]=8 
+  labels_3state -= 1
+  labels_3state[labels_3state>=2]=2
+  return 100.0 * np.sum(np.argmax(predictions_3state, 1) == labels_3state) / predictions_3state.shape[0]
 
 def flatten(data):
-  """Returns a reshaped tensor such that [a,b,c,...,z] dimensioned tesnor becomes
+  """Returns a reshaped tensor such that [a,b,c,...,z] dimensioned tensor becomes
      a [a, b*c*...*z] dimensioned one."""
   data_shape = data.get_shape().as_list()
-  return tf.reshape(data, [data_shape[0], numpy.array(data_shape[1:]).prod()])
+  return tf.reshape(data, [data_shape[0], np.array(data_shape[1:]).prod()])
 
-def main(argv=None):  # pylint: disable=unused-argument
-  # Extract it into numpy arrays.
+def slice_dataset(dataset, slice_param):
+  result = {}
+  for subset in ["sequence", "dssp", "hhm"]:
+    result[subset] = dataset[subset][slice_param]  
+  return result
 
-  all_data = numpy.load(FLAGS.dataset)
-  all_examples = all_data["examples"]
-  all_labels = all_data["labels"][:,1] # use middle label for now
-  percentages = numpy.sum(all_labels, axis=0)/all_labels.shape[0]*100
-  print(percentages.astype(numpy.int32))
-
-  # Generate a validation set.
-  validation_data   = all_examples[:VALIDATION_SIZE, :, :]
-  validation_labels = all_labels[:VALIDATION_SIZE]
-  train_data = all_examples[VALIDATION_SIZE:-TEST_SIZE:, :, :]
-  train_labels = all_labels[VALIDATION_SIZE:-TEST_SIZE:]
-  train_size = train_data.shape[0]
-  test_data =   all_examples[-TEST_SIZE:, :, :]
-  test_labels = all_labels[-TEST_SIZE:]
-  num_epochs = NUM_EPOCHS
-
-  print ("Train data: ", train_data.shape, " labels: ", train_labels.shape)
-  print ("Validation data: ", validation_data.shape, " labels: ", validation_labels.shape)
-  print ("Test data: ", test_data.shape, " labels: ", test_labels.shape)
-  print ("Total data: ", all_examples.shape, " labels: ", all_labels.shape)
+def make_windows(dataset, shuffled=False):
+  hhm_features = dataset["hhm"].shape[1]
+  end = dataset["sequence"].shape[0] - FLAGS.sequence_window
+  seq_windows = np.zeros((end, FLAGS.sequence_window))
+  hhm_windows = np.zeros((end, FLAGS.sequence_window, hhm_features))
+  dssp_windows = np.zeros((end, DSSP_WINDOW))
+  offset = (FLAGS.sequence_window - DSSP_WINDOW)/2
+  seq_count = 0
+  seq_pos = range(seq_windows.shape[0])
+  if shuffled: random.shuffle(seq_pos) 
+  for i in seq_pos:
+    # Ensure center position is actually a residue
+    if dataset["sequence"][i+(FLAGS.sequence_window-1)//2] != 0:
+      seq_windows[seq_count] = dataset["sequence"][i:i+FLAGS.sequence_window]
+      hhm_windows[seq_count] = dataset["hhm"][i:i+FLAGS.sequence_window]
+      dssp_windows[seq_count] = dataset["dssp"][i+offset:i+offset+DSSP_WINDOW]
+      seq_count += 1 
   
-  # This is where training samples and labels are fed to the graph.
-  # These placeholder nodes will be fed a batch of training data at each
-  # training step using the {feed_dict} argument to the Run() call below.
-  train_data_node = tf.placeholder(
-      tf.float32,
-      shape=(BATCH_SIZE, SEQUENCE_WINDOW, NUM_FEATURES))
-  train_labels_node = tf.placeholder(tf.float32,
-                                     shape=(BATCH_SIZE, NUM_LABELS))
+  assert seq_windows.shape[1] == FLAGS.sequence_window
+  assert hhm_windows.shape[1] == FLAGS.sequence_window
+  assert hhm_windows.shape[2] == HHM_ALPHABET
+  assert dssp_windows.shape[1] == DSSP_WINDOW
+  print("Created %d examples"%seq_count)
+  return seq_windows[0:seq_count],hhm_windows[0:seq_count],dssp_windows[0:seq_count]
+
+def to_one_hot_1D(labels, num_classes):
+  num_labels = tf.size(labels)
+  r_labels = tf.expand_dims(tf.cast(labels, tf.int32), 1)
+  indices = tf.expand_dims(tf.range(0, num_labels, 1), 1)
+  concated = tf.concat(1, [indices, r_labels])
+  return tf.sparse_to_dense(concated, tf.pack([num_labels, num_classes]), 1.0, 0.0)
+
+def to_one_hot_2D(labels, num_classes):
+  labels_shape = labels.get_shape().as_list()
+  r_labels = tf.reshape(labels, [-1])
+  return tf.reshape(to_one_hot_1D(r_labels, num_classes), [labels_shape[0], labels_shape[1], num_classes])
+
+def merge_sequence_with_hhm(sequence_data_sparse, hhm_data, train=False):
+  sequence_data_dense = tf.cast(to_one_hot_2D(sequence_data_sparse, RESIDUE_ALPHABET), tf.float32) 
+  merged = tf.concat(2, [sequence_data_dense, hhm_data])
+  return merged
+  
+def main(argv=None):  # pylint: disable=unused-argument
+  # Extract it into np arrays.
+
+  dataset = np.load(FLAGS.dataset)
+  train_size = dataset["sequence"].size - TEST_SIZE - VALIDATION_SIZE
+  print("Training size:", train_size)
+  
+  training_set = slice_dataset(dataset, np.r_[TEST_SIZE+VALIDATION_SIZE:TEST_SIZE+VALIDATION_SIZE+TRAINING_SIZE])
+  training_sequence, training_hhm, training_dssp = make_windows(training_set)  
+  train_size = training_sequence.shape[0]
+
+  validation_set = slice_dataset(dataset, np.r_[TEST_SIZE:VALIDATION_SIZE+TEST_SIZE])
+  validation_sequence, validation_hhm, validation_dssp = make_windows(validation_set)  
+  assert validation_sequence.shape[0] == validation_hhm.shape[0]
+  assert validation_sequence.shape[0] == validation_dssp.shape[0]
+  
+  test_set = slice_dataset(dataset, np.r_[:TEST_SIZE])
+  test_sequence, test_hhm, test_dssp = make_windows(test_set)  
+  assert test_sequence.shape[0] == test_hhm.shape[0]
+  assert test_sequence.shape[0] == test_dssp.shape[0]
+ 
+  train_sequence_node = tf.placeholder(tf.int32, shape=(BATCH_SIZE, FLAGS.sequence_window))
+  train_hhm_node = tf.placeholder(tf.float32, shape=(BATCH_SIZE, FLAGS.sequence_window, HHM_ALPHABET))
+  train_data_node = merge_sequence_with_hhm(train_sequence_node, train_hhm_node) 
+  train_dssp_node = tf.placeholder(tf.int32, shape=(BATCH_SIZE, DSSP_WINDOW))
+  train_labels_node = tf.reshape(to_one_hot_2D(train_dssp_node, DSSP_ALPHABET), [BATCH_SIZE, DSSP_ALPHABET]) # HACK - assumes DSSP_WINDOW==1 
+
   # For the validation and test data, we'll just hold the entire dataset in
   # one constant node.
-  validation_data_node = tf.constant(validation_data)
-  test_data_node = tf.constant(test_data)
+  
+  validation_sequence_node = tf.constant(validation_sequence, dtype=tf.int32)
+  validation_hhm_node = tf.constant(validation_hhm, dtype=tf.float32)
+  validation_data_node = merge_sequence_with_hhm(validation_sequence_node, validation_hhm_node) 
+  test_sequence_node = tf.constant(test_sequence, dtype=tf.int32)
+  test_hhm_node = tf.constant(test_hhm, dtype=tf.float32)
+  test_data_node = merge_sequence_with_hhm(test_sequence_node, test_hhm_node) 
+  
 
   # The variables below hold all the trainable weights. They are passed an
   # initial value which will be assigned when when we call:
   # {tf.initialize_all_variables().run()}
   conv1_filters = 128
   conv1_weights = tf.Variable(
-      tf.truncated_normal([1, 3, NUM_FEATURES, conv1_filters],  # 5x1 filter, depth 32.
+      tf.truncated_normal([1, 3, NUM_FEATURES, conv1_filters],  
                           stddev=0.1,
                           seed=SEED))
   conv1_biases = tf.Variable(tf.zeros([conv1_filters]))
@@ -144,7 +179,7 @@ def main(argv=None):  # pylint: disable=unused-argument
   fc1_nodes = 256
   fc1_weights = tf.Variable(
       tf.truncated_normal(
-          [SEQUENCE_WINDOW*conv2_filters, fc1_nodes],
+          [FLAGS.sequence_window*conv2_filters, fc1_nodes],
           stddev=0.1,
           seed=SEED))
   fc1_biases = tf.Variable(tf.constant(0.1, shape=[fc1_nodes]))
@@ -176,7 +211,7 @@ def main(argv=None):  # pylint: disable=unused-argument
     data = tf.reshape(
         data,
         [data_shape[0], 1,  data_shape[1],  data_shape[2]])
-    #print(data.get_shape().as_list())
+    
     # 2D convolution, with 'SAME' padding (i.e. the output feature map has
     # the same size as the input). Note that {strides} is a 4D array whose
     # shape matches the data layout: [image index, y, x, depth].
@@ -191,27 +226,28 @@ def main(argv=None):  # pylint: disable=unused-argument
                         strides=[1, 1, 1, 1],
                         padding='SAME')
     relu = tf.nn.relu(tf.nn.bias_add(conv, conv2_biases))
-    
     conv = tf.nn.conv2d(relu,
                         conv3_weights,
                         strides=[1, 1, 1, 1],
                         padding='SAME')
     relu = tf.nn.relu(tf.nn.bias_add(conv, conv3_biases))
-    conv = tf.nn.conv2d(conv,
+    conv = tf.nn.conv2d(relu,
                         conv4_weights,
                         strides=[1, 1, 1, 1],
                         padding='SAME')
     relu = tf.nn.relu(tf.nn.bias_add(conv, conv4_biases))
-    
-    return model_fc(relu, train)
+    return relu 
 
   def model(data, train=False):
-    return model_conv(data, train)
+    conv = model_conv(data, train)
+    logits = model_fc(conv, train)
+    return tf.reshape(logits, [-1, DSSP_ALPHABET])
 
   # Training computation: logits + cross-entropy loss.
   logits = model(train_data_node, True)
+  
   loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
-      logits, train_labels_node))
+      logits, train_labels_node)) 
 
   # L2 regularization for the fully connected parameters.
   regularizers = (tf.nn.l2_loss(fc1_weights) + tf.nn.l2_loss(fc1_biases) +
@@ -232,9 +268,7 @@ def main(argv=None):  # pylint: disable=unused-argument
       staircase=True)
 
   # Use simple momentum for the optimization.
-  optimizer = tf.train.MomentumOptimizer(learning_rate,
-                                         0.9).minimize(loss,
-                                                       global_step=batch)
+  optimizer = tf.train.MomentumOptimizer(learning_rate, 0.9).minimize(loss, global_step=batch)
 
   # Predictions for the minibatch, validation set and test set.
   train_prediction = tf.nn.softmax(logits)
@@ -248,30 +282,34 @@ def main(argv=None):  # pylint: disable=unused-argument
     tf.initialize_all_variables().run()
     print('Initialized!')
     # Loop through training steps.
-    for step in xrange(num_epochs * train_size // BATCH_SIZE):
+    for step in xrange(FLAGS.num_epochs * train_size // BATCH_SIZE):
       # Compute the offset of the current minibatch in the data.
       # Note that we could use better randomization across epochs.
       offset = (step * BATCH_SIZE) % (train_size - BATCH_SIZE)
-      batch_data = train_data[offset:(offset + BATCH_SIZE), :, :]
-      batch_labels = train_labels[offset:(offset + BATCH_SIZE)]
-      # This dictionary maps the batch data (as a numpy array) to the
-      # node in the graph is should be fed to.
-      feed_dict = {train_data_node: batch_data,
-                   train_labels_node: batch_labels}
+      feed_dict = {
+        train_sequence_node :   training_sequence[offset:(offset + BATCH_SIZE)], 
+        train_hhm_node :        training_hhm[offset:(offset + BATCH_SIZE)],
+        train_dssp_node :       training_dssp[offset:(offset + BATCH_SIZE)]
+      }
       # Run the graph and fetch some of the nodes.
+      start_time = time.time()
       _, l, lr, predictions = s.run(
           [optimizer, loss, learning_rate, train_prediction],
           feed_dict=feed_dict)
+      duration = time.time() - start_time
       if step % 400 == 0:
-        print('Epoch %.2f learning rate: %.6f Validation success: %.1f%% 3state: %.1f%% ' % (
+        examples_per_sec = float(BATCH_SIZE) / duration
+        validation_result = validation_prediction.eval()
+        print('Epoch %.2f loss: %.2f lrate: %.6f Validation success: %.1f%% 3state: %.1f%% %.0f ex/sec' % (
           float(step) * BATCH_SIZE / train_size,
-          lr,
-          success_rate(validation_prediction.eval(), validation_labels),
-          success_rate_3state(validation_prediction.eval(), validation_labels)))
+          l,lr,
+          success_rate(validation_result, validation_dssp[:,0]),
+          success_rate_3state(validation_result, validation_dssp[:,0]),          
+          examples_per_sec))
         sys.stdout.flush()
     # Finally print the result!
-    test_error = success_rate(test_prediction.eval(), test_labels)
-    print('Test error: %.1f%%  %.1f%% ' %(success_rate(test_prediction.eval(), test_labels) ,success_rate_3state(test_prediction.eval(), test_labels)    ))
+    test_result = test_prediction.eval()
+    print('Test error: %.1f%%  %.1f%% ' %(success_rate(test_result, test_dssp[:,0]) ,success_rate_3state(test_result, test_dssp[:,0])    ))
 
 if __name__ == '__main__':
   tf.app.run()

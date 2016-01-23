@@ -324,6 +324,34 @@ class PDB(object):
       print rowstr
 
 
+  def GetSequenceFeature(self, padding):
+    first = min(self.res.keys()) 
+    last = max(self.res.keys()) 
+    sequence = []
+    for i, ir in enumerate(range( first-padding,  last+padding+1)):
+      if ir in self.res: sequence.append(RESIDUE_1LETTER_TO_ENCODING[self.res[ir]["resname_1"]])
+      else:              sequence.append(0) 
+    return np.array(sequence, dtype=np.int8)
+
+  def GetHMMFeature(self, padding):
+    first = min(self.res.keys()) 
+    last = max(self.res.keys()) 
+    hmm = []
+    for i, ir in enumerate(range( first-padding,  last+padding+1)):
+      try: feature_list = np.array(self.res[ir]["hhmfeatures"])
+      except: feature_list = np.array([0.0]*26)
+      hmm.append(feature_list)
+    return np.vstack(hmm).astype(np.float16) 
+      
+  def GetDSSPFeature(self, padding):
+    first = min(self.res.keys()) 
+    last = max(self.res.keys()) 
+    dssp = []
+    for i, ir in enumerate(range( first-padding,  last+padding+1)):
+      try: dssp.append(dssp_label[self.res[ir]["dssp"]]) 
+      except: dssp.append(0)
+    return np.array(dssp, dtype=np.int8) 
+  
   def GenerateTrainingExamples(self, input_file):
     input_window = 10
     label_window =  1
@@ -375,23 +403,35 @@ def main():
 
   input_files = open(args.input_list).xreadlines()
 
-  all_examples = [] 
-  all_labels = []
+  all_sequence = [] 
+  all_hhm = []
+  all_dssp = []
 
-  for input_file in input_files:
+  padding = 20
+  
+  for i, input_file in enumerate(input_files):
     input_file = input_file.strip()
-    print "Reading: ", input_file
     pdb = PDB()
     try: pdb.ReadFromFile(input_file)
     except: pass
     pdb.ReadDSSPFile(input_file + ".dssp")
     pdb.ReadHHMFile(input_file + ".fas.hhm")
-    examples, labels = pdb.GenerateTrainingExamples(input_file)
-    all_examples.append(examples)
-    all_labels.append(labels)
+    sequence = pdb.GetSequenceFeature(padding)
+    hhm = pdb.GetHMMFeature(padding)
+    dssp = pdb.GetDSSPFeature(padding)
+    assert sequence.shape[0] == hhm.shape[0]
+    assert hhm.shape[0] == dssp.shape[0]
+    all_sequence.append(sequence)
+    all_hhm.append(hhm)
+    all_dssp.append(dssp)
+    if i%100 == 0 : print "Read:", i
 
-  np.savez_compressed("all_examples", examples=np.vstack(all_examples), labels=np.vstack(all_labels))
-  print "Done generating ", np.vstack(all_examples).shape[0], " labelled examples"
+  np.savez_compressed("compacter", 
+      sequence=np.hstack(all_sequence), 
+      hhm=np.vstack(all_hhm), 
+      dssp=np.hstack(all_dssp)) 
+  
+  print "Done generating ", np.hstack(all_sequence).shape[0], " labelled examples"
 
 if __name__ == '__main__':
   main()
