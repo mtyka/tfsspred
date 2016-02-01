@@ -94,7 +94,6 @@ def CalcTorsion(i, a, b, j):
   sin_phi = np.inner(C, B) / (rC * rB);
   return -math.atan2(sin_phi, cos_phi);
 
-
 class PDB(object):
   def __init__(self):
     self.res = {}
@@ -182,7 +181,6 @@ class PDB(object):
             hhm[lastresnum][hhm_tran[i]] = t
           else:
             hhm[lastresnum][hhm_tran[i]] = 2**(float(t)/-1000.0) if t != '*' else 0.0
-
 
     for ir in self.res:
       if "atoms" not in self.res[ir]: continue
@@ -272,9 +270,7 @@ class PDB(object):
         labels.append(class_offset+cl)
       except: pass
       class_offset += len(clusters)
-
     return labels
-
 
   def PrintPhiPsis(self):
     torus_major_radius = 1
@@ -323,7 +319,6 @@ class PDB(object):
           rowstr += "-"
       print rowstr
 
-
   def GetSequenceFeature(self, padding):
     first = min(self.res.keys()) 
     last = max(self.res.keys()) 
@@ -352,46 +347,6 @@ class PDB(object):
       except: dssp.append(0)
     return np.array(dssp, dtype=np.int8) 
   
-  def GenerateTrainingExamples(self, input_file):
-    input_window = 10
-    label_window =  1
-   
-    n_examples = len(self.res) 
-    examples = np.zeros((n_examples, input_window*2 + 1, len(RESIDUE_1LETTER_TO_ENCODING) + 26), dtype=np.float32)
-    labels = np.zeros((n_examples, label_window*2 + 1, len(dssp_label)), dtype=np.float32)
-     
-    for ith_example, k in enumerate(self.res):
-      row = ""
-      context = self.GetContext(k, input_window)
-
-      ## Generate sequence encoding
-
-      sequence = np.array([RESIDUE_1LETTER_TO_ENCODING[cr] for cr in context], dtype=np.uint8)
-      sequence_one_hot = (np.arange(len(RESIDUE_1LETTER_TO_ENCODING)) == sequence[:, None]).astype(np.float32)
-      row += context + " " 
-
-      hmm_features = np.zeros((len(context), 26))
-      for i, ir in enumerate(range( k-input_window,  k+input_window+1)):
-        feature_list = []
-        try: feature_list = self.res[ir]["hhmfeatures"]
-        except: feature_list = [0.0]*26
-        assert len(feature_list) == 26
-        hmm_features[i,:] = feature_list
-        for f in feature_list: 
-          row += "%f "%f
-
-      dssp_features = np.zeros(label_window*2 + 1, dtype=np.uint8)
-      for i, ir in enumerate(range( k-label_window,  k+label_window+1)):
-        try: dssp_features[i] = dssp_label[self.res[ir]["dssp"]] 
-        except: pass 
-      dssp_features_one_hot = (np.arange(len(dssp_label)) == dssp_features[:, None]).astype(np.float32)
-      for f in dssp_features: 
-        row += "%d "%f
-
-      examples[ith_example] = np.hstack((sequence_one_hot, hmm_features))
-      labels[ith_example] = dssp_features_one_hot
-    return examples, labels
-
 def main():
   parser = argparse.ArgumentParser(
       description='Reads PDBs, HHMs and sequences and builds input data.',
