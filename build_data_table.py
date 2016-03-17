@@ -5,8 +5,13 @@ import os
 import math
 import md5
 from collections import defaultdict
-import numpy as np 
+import numpy as np
 import argparse
+
+dist_stats = dict()
+for i in range(0,20):
+ dist_stats[i] = []
+
 
 dssp_label = {
  ' ': 0,
@@ -134,11 +139,16 @@ class PDB(object):
       resletter = line[13]
       if resletter not in "ACDEFGHIKLMNPQRSTVWY":
         continue
+
       ss = line[16]
+      bp1 = int(line[25:29])
+      bp2 = int(line[29:33])
+      acc = int(line[34:38])
       if resnum in self.res:
         if self.res[resnum]["resname_1"] != resletter:
           print "Residue Mismatch in ", self.res[resnum], resletter
         self.res[resnum]["dssp"] = ss
+        self.res[resnum]["acc"] = acc
 
   def ReadHHMFile(self, filename):
     hhm_aas = ['A','C','D','E','F','G','H','I','K','L',
@@ -302,51 +312,83 @@ class PDB(object):
       except:
         pass
 
-  def GetDistanceMatrix(self, res_start, length, atnam="CA"):
-    for i in range(res_start, res_start+length):
+  def CalcLocalConf(self, length, atnam="CA", limit = 10):
+    medians = [ 0, 3, 5, 7, 8, 9, 11, 12, 13, 14, 15, 16, 18, 19, 19, 20, 20, 20, 20, 20]
+
+    for i in range(1,len(self.res)):
       rowstr = ""
-      for j in range(res_start, i):
+      code = 0
+      for di,j in enumerate(range(i-17, i-2) + range(i+3, i+18)):
         try:
           at_i = self.res[i]["atoms"][atnam]
           at_j = self.res[j]["atoms"][atnam]
         except:
+          rowstr += "-"
           continue
         sqrdist = self.GetAtomSqrDistance(at_i, at_j)
-        dist = math.log(math.sqrt(sqrdist)*2, 2)*3-6
-        if dist < 10:
-          rowstr += str(int(dist))
+        dist = math.sqrt(sqrdist)
+        diff = abs(i-j)
+        limit = 20
+        if diff < len(medians):
+          limit = medians[diff]
+          dist_stats[diff].append(dist)
+          #if int(dist*4) < len(dist_stats[diff]):
+          #  dist_stats[diff][int(dist*4 )] += 1
+
+        if dist < limit:
+          code |= 1<<di
+          rowstr += "*" #str(int(dist))
         else:
           rowstr += "-"
-      print rowstr
+      #print rowstr, code
+      self.res[i]["localconf"] = code 
 
   def GetSequenceFeature(self, padding):
-    first = min(self.res.keys()) 
-    last = max(self.res.keys()) 
+    first = min(self.res.keys())
+    last = max(self.res.keys())
     sequence = []
     for i, ir in enumerate(range( first-padding,  last+padding+1)):
       if ir in self.res: sequence.append(RESIDUE_1LETTER_TO_ENCODING[self.res[ir]["resname_1"]])
-      else:              sequence.append(0) 
+      else:              sequence.append(0)
     return np.array(sequence, dtype=np.int8)
 
   def GetHMMFeature(self, padding):
-    first = min(self.res.keys()) 
-    last = max(self.res.keys()) 
+    first = min(self.res.keys())
+    last = max(self.res.keys())
     hmm = []
     for i, ir in enumerate(range( first-padding,  last+padding+1)):
       try: feature_list = np.array(self.res[ir]["hhmfeatures"])
       except: feature_list = np.array([0.0]*26)
       hmm.append(feature_list)
-    return np.vstack(hmm).astype(np.float16) 
-      
+    return np.vstack(hmm).astype(np.float16)
+
   def GetDSSPFeature(self, padding):
-    first = min(self.res.keys()) 
-    last = max(self.res.keys()) 
+    first = min(self.res.keys())
+    last = max(self.res.keys())
     dssp = []
     for i, ir in enumerate(range( first-padding,  last+padding+1)):
-      try: dssp.append(dssp_label[self.res[ir]["dssp"]]) 
+      try: dssp.append(dssp_label[self.res[ir]["dssp"]])
       except: dssp.append(0)
-    return np.array(dssp, dtype=np.int8) 
+    return np.array(dssp, dtype=np.int8)
   
+  def GetACCFeature(self, padding):
+    first = min(self.res.keys())
+    last = max(self.res.keys())
+    acc = []
+    for i, ir in enumerate(range( first-padding,  last+padding+1)):
+      try: acc.append(acc_label[self.res[ir]["acc"]])
+      except: acc.append(0)
+    return np.array(acc, dtype=np.int8)
+  
+  def GetLocalconfFeature(self, padding):
+    first = min(self.res.keys())
+    last = max(self.res.keys())
+    localconf = []
+    for i, ir in enumerate(range( first-padding,  last+padding+1)):
+      try: localconf.append(localconf_label[self.res[ir]["localconf"]])
+      except: localconf.append(0)
+    return np.array(localconf, dtype=np.int8)
+
 def main():
   parser = argparse.ArgumentParser(
       description='Reads PDBs, HHMs and sequences and builds input data.',
@@ -358,12 +400,14 @@ def main():
 
   input_files = open(args.input_list).xreadlines()
 
-  all_sequence = [] 
+  all_sequence = []
   all_hhm = []
   all_dssp = []
+  all_acc = []
+  all_localconf = []
 
   padding = 20
-  
+
   for i, input_file in enumerate(input_files):
     input_file = input_file.strip()
     pdb = PDB()
@@ -371,21 +415,37 @@ def main():
     except: pass
     pdb.ReadDSSPFile(input_file + ".dssp")
     pdb.ReadHHMFile(input_file + ".fas.hhm")
+    pdb.CalcLocalConf(1)
+    
     sequence = pdb.GetSequenceFeature(padding)
     hhm = pdb.GetHMMFeature(padding)
     dssp = pdb.GetDSSPFeature(padding)
+    acc = pdb.GetACCFeature(padding)
+    localconf = pdb.GetLocalconfFeature(padding)
     assert sequence.shape[0] == hhm.shape[0]
-    assert hhm.shape[0] == dssp.shape[0]
+    assert sequence.shape[0] == dssp.shape[0]
+    assert sequence.shape[0] == acc.shape[0]
+    assert sequence.shape[0] == localconf.shape[0]
     all_sequence.append(sequence)
     all_hhm.append(hhm)
     all_dssp.append(dssp)
+    all_acc.append(acc)
+    all_localconf.append(localconf)
     if i%100 == 0 : print "Read:", i
 
-  np.savez_compressed("compacter", 
-      sequence=np.hstack(all_sequence), 
-      hhm=np.vstack(all_hhm), 
-      dssp=np.hstack(all_dssp)) 
-  
+#  # print median distances
+#  for i in range(0,20):
+#    if len(dist_stats[i]) > 0:
+#      print "Med: ", i," : ", sorted(dist_stats[i])[len(dist_stats[i])//4]
+#    #print "Med: ", i," : ", " ".join([str(i) for i in dist_stats[i]])
+
+  np.savez_compressed("compacter",
+      sequence=np.hstack(all_sequence),
+      hhm=np.vstack(all_hhm),
+      dssp=np.hstack(all_dssp),
+      acc=np.vstack(all_acc),
+      localconf=np.hstack(all_localconf))
+
   print "Done generating ", np.hstack(all_sequence).shape[0], " labelled examples"
 
 if __name__ == '__main__':
